@@ -11,8 +11,8 @@ import torch.optim as optim
 
 from model import CNN, load_mnist, make_loaders, evaluate
 
-DATA_DIR = Path(os.environ.get("MNIST_DATA_DIR", "/home/renku/work/data/mnist"))
-MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/home/renku/work/models"))
+DATA_DIR = Path(os.environ.get("MNIST_DATA_DIR", "/home/renku/work/mnist-dataset-doi-10.5281-zenodo.10058130"))
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/home/renku/work/model-artifacts/mnist-cnn-claude"))
 MODEL_PATH = MODEL_DIR / "mnist_cnn.pt"
 TARGET_ACCURACY = float(os.environ.get("TARGET_ACCURACY", "0.99"))
 MAX_EPOCHS = int(os.environ.get("MAX_EPOCHS", "30"))

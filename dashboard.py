@@ -10,41 +10,65 @@ import numpy as np
 import streamlit as st
 import torch
 
-from model import CNN, load_mnist, make_loaders, evaluate
+from model import CNN, load_mnist, make_loaders
 
-DATA_DIR = Path(os.environ.get("MNIST_DATA_DIR", "/home/renku/work/data/mnist"))
-MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/home/renku/work/models"))
+DATA_DIR = Path(os.environ.get("MNIST_DATA_DIR", "/home/renku/work/mnist-dataset-doi-10.5281-zenodo.10058130"))
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/home/renku/work/model-artifacts/mnist-cnn-claude"))
 MODEL_PATH = MODEL_DIR / "mnist_cnn.pt"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+_FALLBACK_PATHS = [
+    Path("/home/renku/work/model-artifacts/mnist-models/mnist_cnn.pt"),
+    Path("/home/renku/work/pretrained-model-artifacts/mnist_cnn.pt"),
+    Path("/home/renku/work/pretrained-model-artifacts/mnist-models/mnist_cnn.pt"),
+]
 
 st.set_page_config(page_title="MNIST Inference", layout="wide")
 st.title("MNIST Digit Classifier")
 
 
+def _find_model_path():
+    for p in [MODEL_PATH] + _FALLBACK_PATHS:
+        if p.exists():
+            return p
+    return None
+
+
+def _to_tensor(imgs):
+    t = torch.tensor(imgs, dtype=torch.float32)
+    if t.ndim == 3:
+        t = t.unsqueeze(1)
+    if t.max() > 1.5:
+        t = t / 255.0
+    return t
+
+
 @st.cache_resource
 def load_model():
-    if not MODEL_PATH.exists():
+    path = _find_model_path()
+    if path is None:
         return None
-    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+    checkpoint = torch.load(path, map_location=DEVICE, weights_only=False)
     model = CNN().to(DEVICE)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
-    return model, checkpoint.get("accuracy", "?"), checkpoint.get("epoch", "?")
+    return model, checkpoint.get("accuracy", "?"), checkpoint.get("epoch", "?"), str(path)
 
 
 @st.cache_data
 def load_test_data():
-    x_train, y_train, x_test, y_test = load_mnist(DATA_DIR)
+    _, _, x_test, y_test = load_mnist(DATA_DIR)
     return x_test, y_test
 
 
-# ── Sidebar ─────────────────────────────────────────────────────────────────
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Model")
     result = load_model()
     if result:
-        _, acc, epoch = result
-        st.success(f"Model loaded (acc={acc:.4f}, epoch {epoch})")
+        _, acc, epoch, model_path = result
+        st.success(f"Loaded (acc={acc:.4f}, epoch {epoch})")
+        st.caption(f"From: `{model_path}`")
     else:
         st.warning("No trained model found.")
 
@@ -58,7 +82,7 @@ with st.sidebar:
         env["MAX_EPOCHS"] = str(max_epochs)
         env["MNIST_DATA_DIR"] = str(DATA_DIR)
         env["MODEL_DIR"] = str(MODEL_DIR)
-        with st.spinner("Training…"):
+        with st.spinner("Training… (this may take several minutes)"):
             proc = subprocess.run(
                 [sys.executable, str(Path(__file__).parent / "train.py")],
                 env=env, capture_output=True, text=True,
@@ -69,9 +93,9 @@ with st.sidebar:
             st.rerun()
         else:
             st.error("Training failed.")
-            st.code(proc.stdout[-3000:] + proc.stderr[-1000:])
+            st.code(proc.stdout[-3000:] + "\n" + proc.stderr[-1000:])
 
-# ── Main area ────────────────────────────────────────────────────────────────
+# ── Main area ─────────────────────────────────────────────────────────────────
 model_result = load_model()
 
 try:
@@ -83,33 +107,35 @@ except Exception as e:
 
 if data_ok and model_result:
     import matplotlib.pyplot as plt
-    import matplotlib.gridspec as gridspec
 
-    model, acc, epoch = model_result
+    model, acc, epoch, model_path = model_result
 
     st.subheader(f"Random sample predictions  —  model accuracy {acc:.4f}")
 
-    n_cols = st.slider("Columns", 4, 10, 6)
-    n_rows = st.slider("Rows", 2, 6, 3)
-    n = n_cols * n_rows
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        n_cols = st.slider("Columns", 4, 10, 6)
+        n_rows = st.slider("Rows", 2, 6, 3)
+    with col2:
+        st.write("")
+        shuffle = st.button("Shuffle samples")
 
-    if st.button("Shuffle samples") or "indices" not in st.session_state:
+    n = n_cols * n_rows
+    if shuffle or "indices" not in st.session_state:
         st.session_state["indices"] = np.random.choice(len(x_test), n, replace=False)
 
     idxs = st.session_state["indices"]
     imgs = x_test[idxs]
     labels = y_test[idxs]
 
-    # batch inference
-    t = torch.tensor(imgs, dtype=torch.float32).unsqueeze(1) / 255.0
     with torch.no_grad():
-        logits = model(t.to(DEVICE))
+        logits = model(_to_tensor(imgs).to(DEVICE))
         probs = torch.softmax(logits, dim=1).cpu().numpy()
         preds = logits.argmax(1).cpu().numpy()
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 1.6, n_rows * 2.0))
     for ax, img, label, pred, prob in zip(axes.flat, imgs, labels, preds, probs):
-        ax.imshow(img, cmap="gray")
+        ax.imshow(img if img.ndim == 2 else img.squeeze(), cmap="gray")
         color = "green" if pred == label else "red"
         ax.set_title(f"pred={pred}\ntrue={label}\n{prob[pred]*100:.1f}%", fontsize=7, color=color)
         ax.axis("off")
@@ -117,12 +143,9 @@ if data_ok and model_result:
     st.pyplot(fig)
     plt.close(fig)
 
-    # ── Confusion-style per-digit accuracy ──────────────────────────────────
+    # ── Per-digit accuracy ───────────────────────────────────────────────────
     st.subheader("Per-digit accuracy on full test set")
-    t_all = torch.tensor(x_test, dtype=torch.float32).unsqueeze(1) / 255.0
-    _, test_loader = make_loaders(
-        x_test, y_test, x_test, y_test, batch_size=256
-    )
+    _, test_loader = make_loaders(x_test, y_test, x_test, y_test, batch_size=256)
     all_preds, all_true = [], []
     model.eval()
     with torch.no_grad():
@@ -132,9 +155,7 @@ if data_ok and model_result:
     all_preds = np.concatenate(all_preds)
     all_true = np.concatenate(all_true)
 
-    digit_accs = {
-        d: (all_preds[all_true == d] == d).mean() for d in range(10)
-    }
+    digit_accs = {d: (all_preds[all_true == d] == d).mean() for d in range(10)}
     cols = st.columns(10)
     for d, col in enumerate(cols):
         col.metric(str(d), f"{digit_accs[d]*100:.1f}%")
